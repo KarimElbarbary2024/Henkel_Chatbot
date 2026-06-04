@@ -1,22 +1,7 @@
-import os
 import re
 import pdfplumber
-from dotenv import load_dotenv
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from langchain_qdrant import QdrantVectorStore
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
-
-load_dotenv()
 
 PDF_PATH = "data/iphone_user_guide.pdf"
-SOURCE_NAME = "iphone_user_guide.pdf"
-COLLECTION_NAME = "iphone-user-guide"
-QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-
-MAX_SECTION_LENGTH = 1000
 
 GROUND_TRUTH = [
     ("iPhone overview", 8),
@@ -231,29 +216,12 @@ GROUND_TRUTH = [
     ("Apple and the environment", 161),
 ]
 
-# injected at the top of every chunk for that section to boost embedding signal
-# this is used for sections whose extracted text is too semantically thin or uses different terminology
-# than a typical user query would
-SECTION_PREFIXES = {
-    "Do Not Disturb": "Do Not Disturb: silence calls and notifications automatically on a schedule or manually. Block interruptions while sleeping or in meetings.",
-    "AirDrop, iCloud, and other ways to share": "AirDrop: share photos videos and files wirelessly with nearby devices. AirDrop requires iCloud account and works within approximately 30 feet (10 meters). Uses Wi-Fi and Bluetooth. Available in Control Center.",
-    "Sounds and silence": "Sounds and silence: change ringtone volume, mute switch, vibrate settings, silence iPhone.",
-    "Ringtones and vibrations": "Ringtones and vibrations: change ringtone, set vibration pattern, assign ringtone to contact, vibrate only mode.",
-    "Call forwarding, call waiting, and caller ID": "Call forwarding, call waiting, and caller ID: forward calls to another number, enable call waiting, show or hide your number.",
-    "Security": "Security: set passcode, Touch ID, auto-lock, change or turn off passcode. Protect iPhone with a PIN or password.",
-    "Restart or reset iPhone": "Restart or reset iPhone: force restart frozen iPhone, reset all settings, erase all content, hard reset.",
-    "Disabled iPhone": "Disabled iPhone: iPhone is disabled after too many wrong passcode attempts. Connect to iTunes to restore.",
-    "HDR": "HDR: High Dynamic Range photo mode. HDR blends multiple exposures for better highlights and shadows in photos.",
-    "Phone calls": "Phone calls: make a call, answer a call, use Siri to call someone, dial a number, call a contact by name, call using voice.",
-    "Genius—made for you": "Genius: automatic playlist feature in Music app. Genius made for you creates playlists based on songs in your library.",
-    "Sell or give away iPhone?": "Sell or give away iPhone: erase all content and settings before selling, trading in, or giving away your iPhone. Factory reset.",
-    "iCloud": "iCloud: cloud storage and sync service. Back up iPhone to iCloud, manage iCloud storage, upgrade storage plan, buy more storage, Change Storage Plan, 5 GB free. Go to Settings > iCloud > Storage & Backup > Buy More Storage.",
-    "Control playback": "Control playback: play pause skip rewind fast forward adjust volume scrub through video or audio.",
-}
+
+def normalize(text):
+    return re.sub(r'\s+', ' ', text).strip().lower()
 
 
 def build_page_map(pdf):
-    # printed_page -> pdf_idx, built from the footer line at max y on each page
     page_map = {}
     for idx, page in enumerate(pdf.pages):
         if not page.chars:
@@ -270,146 +238,94 @@ def build_page_map(pdf):
     return page_map
 
 
-def extract_page_text(pdf, pdf_idx):
-    page = pdf.pages[pdf_idx]
-    text = page.extract_text()
-    if not text:
-        return ""
-    # strip the chapter footer line e.g. "Chapter 3 Basics 26"
-    cleaned = re.sub(r'Chapter\s+\d+\s+.+?\s+\d+\s*$', '', text.strip(), flags=re.MULTILINE)
-    return cleaned.strip()
+def extract_sections(pdf, page_map):
+    gt_lookup = {}
+    for name, page in GROUND_TRUTH:
+        gt_lookup[normalize(name)] = (name, page)
 
+    found = []
+    seen = set()
 
-    return sections
-def build_sections(pdf, page_map):
-    sections = []
-
-    for i, (name, printed_page) in enumerate(GROUND_TRUTH):
-        next_printed_page = GROUND_TRUTH[i + 1][1] if i + 1 < len(GROUND_TRUTH) else None
-
-        start_idx = page_map.get(printed_page)
-        if start_idx is None:
-            print("no pdf idx for printed page", printed_page, "| skipping:", name)
+    for idx, page in enumerate(pdf.pages):
+        if idx < 7:
             continue
-
-        if next_printed_page is None:
-            end_idx = start_idx + 1
-        else:
-            end_idx = page_map.get(next_printed_page, start_idx + 1)
-
-        full_text = ""
-        for idx in range(start_idx, max(end_idx, start_idx + 1)):
-            full_text += extract_page_text(pdf, idx) + "\n"
-
-        norm_name = re.escape(name)
-        match = re.search(norm_name, full_text, re.IGNORECASE)
-        heading_found = match is not None
-
-        if heading_found:
-            full_text = full_text[match.start():]
-            if i + 1 < len(GROUND_TRUTH) and next_printed_page == printed_page:
-                next_name = re.escape(GROUND_TRUTH[i + 1][0])
-                next_match = re.search(next_name, full_text, re.IGNORECASE)
-                if next_match:
-                    full_text = full_text[:next_match.start()]
-
-        if not full_text.strip():
-            print("EMPTY after trim:", name, "| p" + str(printed_page))
-
-        sections.append({
-            "heading": name,
-            "text": full_text.strip(),
-            "page_number": printed_page,
-        })
-
-    print("sections built:", len(sections))
-    return sections
-def chunk_sections(sections):
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=MAX_SECTION_LENGTH,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ".", " "]
-    )
-
-    all_chunks = []
-    for section in sections:
-        text = section["text"]
+        text = page.extract_text()
         if not text:
             continue
 
-        # prepend heading to every chunk so the section name is always in the embedding
-        # also prepend any keyword-rich prefix for sections with thin or mismatched text
-        heading_line = section["heading"] + "\n"
-        prefix = SECTION_PREFIXES.get(section["heading"], "")
-        prefix_block = (prefix + "\n") if prefix else ""
+        printed_page = next(
+            (p for p, i in page_map.items() if i == idx),
+            idx + 1
+        )
 
-        if len(text) <= MAX_SECTION_LENGTH:
-            all_chunks.append({
-                "text": heading_line + prefix_block + text,
-                "metadata": {
-                    "page_number": section["page_number"],
-                    "section": section["heading"],
-                    "source": SOURCE_NAME,
-                }
+        for line in text.split('\n'):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            norm = normalize(stripped)
+            if norm not in gt_lookup:
+                continue
+            gt_name, gt_page = gt_lookup[norm]
+            if len(stripped) > len(gt_name) + 15:
+                continue
+            key = (norm, printed_page)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({
+                "name": gt_name,
+                "expected_page": gt_page,
+                "found_on_pdf_page": printed_page,
             })
-        else:
-            for chunk in splitter.split_text(text):
-                all_chunks.append({
-                    "text": heading_line + prefix_block + chunk,
-                    "metadata": {
-                        "page_number": section["page_number"],
-                        "section": section["heading"],
-                        "source": SOURCE_NAME,
-                    }
-                })
 
-    print("chunks created:", len(all_chunks))
-    return all_chunks
+    return found
 
 
-def reset_collection(client, dim=1536):
-    existing = [c.name for c in client.get_collections().collections]
-    if COLLECTION_NAME in existing:
-        client.delete_collection(COLLECTION_NAME)
-        print("old collection deleted")
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=dim, distance=Distance.COSINE)
-    )
-    print("new collection created")
+def run_comparison(found):
+    gt_names = {normalize(name) for name, _ in GROUND_TRUTH}
+    found_names = {normalize(f["name"]) for f in found}
 
+    missed = [(name, page) for name, page in GROUND_TRUTH if normalize(name) not in found_names]
+    wrong_page = [
+        f for f in found
+        if normalize(f["name"]) in gt_names
+        and f["found_on_pdf_page"] != f["expected_page"]
+    ]
+    extra = [f for f in found if normalize(f["name"]) not in gt_names]
 
-def ingest():
-    with pdfplumber.open(PDF_PATH) as pdf:
-        page_map = build_page_map(pdf)
-        print("page map built,", len(page_map), "pages mapped")
-        sections = build_sections(pdf, page_map)
+    print("found:", len(found_names), "unique headings /", len(GROUND_TRUTH), "total")
+    print("wrong page:", len(wrong_page))
+    print("missed:", len(missed))
+    print("extra noise:", len(extra))
 
-    chunks = chunk_sections(sections)
+    if missed:
+        print("\nmissed:")
+        for name, page in missed:
+            print("  expected p" + str(page) + " |", name)
 
-    client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-    reset_collection(client)
+    if wrong_page:
+        print("\nwrong page:")
+        for f in wrong_page:
+            print("  found p" + str(f["found_on_pdf_page"]) + " expected p" + str(f["expected_page"]) + " |", f["name"])
 
-    embeddings = OpenAIEmbeddings(
-        model="text-embedding-3-small",
-        openai_api_key=os.getenv("OPENAI_API_KEY")
-    )
+    if extra:
+        print("\nextra noise:")
+        for f in extra:
+            print("  p" + str(f["found_on_pdf_page"]) + " |", f["name"])
 
-    texts = [c["text"] for c in chunks]
-    metadatas = [c["metadata"] for c in chunks]
-
-    QdrantVectorStore.from_texts(
-        texts=texts,
-        embedding=embeddings,
-        metadatas=metadatas,
-        url=QDRANT_URL,
-        api_key=QDRANT_API_KEY,
-        collection_name=COLLECTION_NAME,
-        force_recreate=False
-    )
-
-    print("ingestion complete,", len(chunks), "chunks uploaded")
+    print("\ntrue matches:")
+    for f in found:
+        if f["found_on_pdf_page"] == f["expected_page"]:
+            print("  p" + str(f["found_on_pdf_page"]) + " |", f["name"])
 
 
 if __name__ == "__main__":
-    ingest()
+    with pdfplumber.open(PDF_PATH) as pdf:
+        print("loaded", len(pdf.pages), "pages")
+        page_map = build_page_map(pdf)
+        print("page map built,", len(page_map), "pages mapped")
+        print()
+        found = extract_sections(pdf, page_map)
+        print("candidates found:", len(found))
+        print()
+        run_comparison(found)

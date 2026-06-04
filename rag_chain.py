@@ -35,17 +35,17 @@ def build_retriever():
 
 
 def build_chain():
+    from langchain.prompts import PromptTemplate
+    from prompts import SYSTEM_PROMPT, HUMAN_PROMPT, format_chunks
+
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0,
         openai_api_key=os.getenv("OPENAI_API_KEY")
     )
 
-    # temperature=0 keeps answers consistent and grounded si it does not allow for creative deviation
-
     retriever = build_retriever()
 
-    # window of 5 keeps recent context in memory for follow-up questions, but forgets earlier conversation to save tokens
     memory = ConversationBufferWindowMemory(
         k=5,
         memory_key="chat_history",
@@ -58,13 +58,21 @@ def build_chain():
         HumanMessagePromptTemplate.from_template(HUMAN_PROMPT)
     ])
 
+    doc_prompt = PromptTemplate(
+        input_variables=["page_content", "page_number", "section"],
+        template="[Page {page_number} | {section}]\n{page_content}"
+    )
+
     chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=retriever,
         memory=memory,
-        combine_docs_chain_kwargs={"prompt": prompt},
+        combine_docs_chain_kwargs={
+            "prompt": prompt,
+            "document_prompt": doc_prompt,
+            "document_separator": "\n\n",
+        },
         return_source_documents=True,
-        # condense_question_llm uses the same model for the rewriting step
         condense_question_llm=llm,
         output_key="answer"
     )
