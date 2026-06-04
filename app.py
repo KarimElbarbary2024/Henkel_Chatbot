@@ -2,10 +2,30 @@ import chainlit as cl
 from rag_chain import build_chain
 
 
+@cl.set_starters
+async def set_starters():
+    return [
+        cl.Starter(
+            label="How do I turn on Do Not Disturb?",
+            message="How do I turn on Do Not Disturb?",
+        ),
+        cl.Starter(
+            label="How do I set up iCloud?",
+            message="How do I set up iCloud?",
+        ),
+        cl.Starter(
+            label="How do I take a photo?",
+            message="How do I take a photo?",
+        ),
+        cl.Starter(
+            label="How do I restart my iPhone?",
+            message="How do I restart my iPhone?",
+        ),
+    ]
+
 
 @cl.on_chat_start
 async def start():
-    # build once per session and cache it, no reason to rebuild on every message
     chain = build_chain()
     cl.user_session.set("chain", chain)
 
@@ -17,6 +37,15 @@ async def start():
 @cl.on_message
 async def main(message: cl.Message):
     chain = cl.user_session.get("chain")
+
+    # handle basic conversational messages before hitting the RAG chain
+    greetings = ["hi", "hello", "hey", "how are you", "what's up", "sup", "good morning", "good evening"]
+    if message.content.strip().lower() in greetings:
+        await cl.Message(
+            content="Hey there! I'm Siri-ously doing great :) I'm here to answer your questions about the iPhone User Guide for iOS 7.1. What would you like to know?"
+        ).send()
+        return
+
     msg = cl.Message(content="")
 
     result = None
@@ -26,26 +55,7 @@ async def main(message: cl.Message):
     ):
         if "answer" in chunk:
             await msg.stream_token(chunk["answer"])
-        # captures the full result so we can pull source docs after streaming
         if chunk:
             result = chunk
 
-    source_elements = []
-    seen_pages = []
-
-    # pull source docs directly from the chain result instead of a second search
-    if result and "source_documents" in result:
-        for doc in result["source_documents"]:
-            page = doc.metadata.get("page_number", "unknown")
-            if page not in seen_pages:
-                seen_pages.append(page)
-                source_elements.append(
-                    cl.Text(
-                        name=f"Page {page}",
-                        content=doc.page_content,
-                        display="inline"
-                    )
-                )
-
-    msg.elements = source_elements
     await msg.send()

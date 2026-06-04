@@ -1,0 +1,23 @@
+[project]
+name = "Siri-ously"
+enable_telemetry = false
+
+[UI]
+name = "Siri-ously"
+description = "Your iPhone User Guide assistant, powered by Henkel Technology."
+default_theme = "light"
+custom_css = "/public/style.css"
+
+[UI.theme]
+    [UI.theme.light]
+    background = "#FFFFFF"
+    paper = "#F5F5F5"
+
+        [UI.theme.light.primary]
+        main = "#E1000F"
+        dark = "#A8000B"
+        light = "#FF3333"
+
+        [UI.theme.light.text]
+        primary = "#222222"
+        secondary = "#666666"

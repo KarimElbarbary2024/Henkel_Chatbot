@@ -1,0 +1,21 @@
+header {
+    background-color: #E1000F !important;
+}
+
+button[type="submit"], .send-button {
+    background-color: #E1000F !important;
+    color: #FFFFFF !important;
+}
+
+.message.user {
+    background-color: #E1000F !important;
+    color: #FFFFFF !important;
+}
+
+a {
+    color: #E1000F !important;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #DED7D6;
+}
